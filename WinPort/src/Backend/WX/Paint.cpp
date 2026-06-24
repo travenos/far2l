@@ -337,7 +337,9 @@ void ConsolePaintContext::ApplyFont(wxPaintDC &dc, uint8_t index)
 // intact, while RTL runs (Hebrew/Arabic/...) are reversed in place - including
 // word order across spaces - and embedded numbers/LTR text keep natural order.
 
-enum BidiClass : uint8_t { BIDI_L, BIDI_R, BIDI_NUM, BIDI_NEUTRAL };
+// BIDI_BOUND covers UI/service glyphs (box drawing, separators, blocks, any
+// non-letter symbol): they must always keep their cell and never be reordered.
+enum BidiClass : uint8_t { BIDI_L, BIDI_R, BIDI_NUM, BIDI_NEUTRAL, BIDI_BOUND };
 
 static inline wchar_t BidiCellBaseChar(const CHAR_INFO &ci)
 {
@@ -369,17 +371,33 @@ static inline bool BidiIsNum(wchar_t wc)
 static inline BidiClass BidiClassify(const CHAR_INFO &ci)
 {
 	const wchar_t wc = BidiCellBaseChar(ci);
-	if (BidiIsRTL(wc)) return BIDI_R;
-	if (BidiIsNum(wc)) return BIDI_NUM;
-	// Empty cells, whitespace and ASCII punctuation/symbols are neutral so they
-	// can join a surrounding RTL run; everything else (Latin, CJK, ...) is LTR.
-	if (wc == 0 || (wc < 0x80 && !iswalpha(wc)))
+	if (wc == 0)
 		return BIDI_NEUTRAL;
-	return BIDI_L;
+	if (BidiIsRTL(wc))
+		return BIDI_R;
+	if (BidiIsNum(wc))
+		return BIDI_NUM;
+	// Real letters are content that can participate in reordering (e.g. a Latin
+	// word embedded in Hebrew); empty/whitespace/ASCII punctuation are neutral
+	// and join the surrounding run. Anything else (box drawing, separators and
+	// other graphical/service glyphs of any code) must stay where it is.
+	if (iswalpha((wint_t)wc))
+		return BIDI_L;
+	if (iswspace((wint_t)wc) || wc < 0x80)
+		return BIDI_NEUTRAL;
+	return BIDI_BOUND;
 }
 
-static void BidiReorderLine(CHAR_INFO *line, unsigned int cw)
+// Reorders a console line into visual order. When vis2log != nullptr it is
+// filled (size cw) so that vis2log[v] is the logical column shown at visual
+// column v (identity when the line has no RTL). Returns true if reordered.
+static bool BidiReorderLine(CHAR_INFO *line, unsigned int cw, unsigned int *vis2log = nullptr)
 {
+	if (vis2log) {
+		for (unsigned int i = 0; i < cw; ++i)
+			vis2log[i] = i;
+	}
+
 	bool has_rtl = false;
 	for (unsigned int i = 0; i < cw; ++i) {
 		if (BidiClassify(line[i]) == BIDI_R) {
@@ -388,34 +406,38 @@ static void BidiReorderLine(CHAR_INFO *line, unsigned int cw)
 		}
 	}
 	if (!has_rtl)
-		return;
+		return false;
 
 	std::vector<BidiClass> cls(cw);
 	std::vector<uint8_t> levels(cw, 0);  // embedding level per cell, base 0
 	for (unsigned int i = 0; i < cw; ++i)
 		cls[i] = BidiClassify(line[i]);
 
-	// Resolve embedding levels: strong RTL -> 1, strong LTR -> 0, and each
-	// maximal run of weak/neutral cells adopts the RTL context only when it is
-	// surrounded by RTL on both sides (numbers stay LTR at level 2).
+	// Resolve embedding levels (base LTR, level 0). Strong RTL cells get level 1.
+	// Any maximal run of non-RTL cells (LTR letters, numbers, neutrals) that is
+	// surrounded by RTL on both sides is an island embedded in the RTL flow: its
+	// LTR/number cells get level 2 (kept left-to-right but repositioned inside the
+	// RTL run) and its neutrals get level 1 (so they reverse with the run). This
+	// makes embedded Latin words and numbers behave the same way and land where
+	// the caret is. Non-surrounded LTR/neutral content stays at base level 0.
 	unsigned int max_level = 0;
 	for (unsigned int i = 0; i < cw; ) {
 		if (cls[i] == BIDI_R) {
 			levels[i] = 1;
 			if (max_level < 1) max_level = 1;
 			++i;
-		} else if (cls[i] == BIDI_L) {
-			levels[i] = 0;
+		} else if (cls[i] == BIDI_BOUND) {
+			levels[i] = 0;  // service glyph: stays in place, breaks the RTL run
 			++i;
 		} else {
 			const unsigned int run_begin = i;
-			while (i < cw && cls[i] != BIDI_R && cls[i] != BIDI_L)
+			while (i < cw && cls[i] != BIDI_R && cls[i] != BIDI_BOUND)
 				++i;
 			const bool left_rtl = (run_begin > 0 && cls[run_begin - 1] == BIDI_R);
 			const bool right_rtl = (i < cw && cls[i] == BIDI_R);
 			if (left_rtl && right_rtl) {
 				for (unsigned int j = run_begin; j < i; ++j) {
-					levels[j] = (cls[j] == BIDI_NUM) ? 2 : 1;
+					levels[j] = (cls[j] == BIDI_NEUTRAL) ? 1 : 2;
 					if (max_level < levels[j]) max_level = levels[j];
 				}
 			}
@@ -437,11 +459,39 @@ static void BidiReorderLine(CHAR_INFO *line, unsigned int cw)
 			while (l < r) {
 				std::swap(line[l], line[r]);
 				std::swap(levels[l], levels[r]);
+				if (vis2log)
+					std::swap(vis2log[l], vis2log[r]);
 				++l;
 				--r;
 			}
 		}
 	}
+	return true;
+}
+
+unsigned int ConsolePaintContext::BidiVisualColumnToLogical(unsigned int cy, unsigned int vis_x)
+{
+	unsigned int cw, ch;
+	g_winport_con_out->GetSize(cw, ch);
+	if (cy >= ch || vis_x >= cw)
+		return vis_x;
+
+	std::vector<CHAR_INFO> tmp(cw);
+	{
+		IConsoleOutput::DirectLineAccess dla(g_winport_con_out, cy);
+		const CHAR_INFO *line = dla.Line();
+		const unsigned int w = line ? std::min(dla.Width(), cw) : 0;
+		if (w)
+			memcpy(&tmp[0], line, w * sizeof(CHAR_INFO));
+		if (w < cw)
+			memset(&tmp[w], 0, (cw - w) * sizeof(CHAR_INFO));
+	}
+
+	std::vector<unsigned int> vis2log(cw);
+	if (!BidiReorderLine(&tmp[0], cw, &vis2log[0]))
+		return vis_x;
+
+	return vis2log[vis_x];
 }
 
 void ConsolePaintContext::OnPaint(wxPaintDC &dc, SMALL_RECT *qedit)
@@ -496,6 +546,7 @@ void ConsolePaintContext::OnPaint(wxPaintDC &dc, SMALL_RECT *qedit)
 
 	_cursor_props.Update();
 
+	std::vector<unsigned int> vis2log(cw);
 	ConsolePainter painter(this, dc, _buffer, _cursor_props);
 	for (unsigned int cy = (unsigned)area.Top; cy <= (unsigned)area.Bottom; ++cy) {
 		wxRegionContain lc = rgn.Contains(0, cy * _font_height, cw * _font_width, _font_height);
@@ -519,7 +570,25 @@ void ConsolePaintContext::OnPaint(wxPaintDC &dc, SMALL_RECT *qedit)
 			line = &_line[0];
 		}
 
-		BidiReorderLine(&_line[0], cw);
+		const bool is_cursor_row = (_cursor_props.visible
+			&& (unsigned int)_cursor_props.pos.Y == cy);
+		const bool had_rtl = BidiReorderLine(&_line[0], cw,
+			is_cursor_row ? &vis2log[0] : nullptr);
+
+		if (is_cursor_row) {
+			// The block caret is reported in logical coordinates; map it to the
+			// visual column so it appears where the user is actually editing.
+			unsigned int cursor_vis_x = (unsigned int)_cursor_props.pos.X;
+			if (had_rtl && (unsigned int)_cursor_props.pos.X < cw) {
+				for (unsigned int v = 0; v < cw; ++v) {
+					if (vis2log[v] == (unsigned int)_cursor_props.pos.X) {
+						cursor_vis_x = v;
+						break;
+					}
+				}
+			}
+			painter.SetCursorVisualX(cursor_vis_x);
+		}
 
 		painter.LineBegin(cy);
 		wchar_t tmp_wcz[2] = {0, 0};
@@ -692,7 +761,8 @@ void CursorProps::Update()
 
 ConsolePainter::ConsolePainter(ConsolePaintContext *context, wxPaintDC &dc, wxString &buffer, CursorProps &cursor_props) :
 	_context(context), _dc(dc), _buffer(buffer), _cursor_props(cursor_props),
-	_start_cx((unsigned int)-1), _start_back_cx((unsigned int)-1), _prev_fit_font_index(0),
+	_start_cx((unsigned int)-1), _start_back_cx((unsigned int)-1),
+	_cursor_vis_x((unsigned int)cursor_props.pos.X), _prev_fit_font_index(0),
 	_prev_underlined(false), _prev_strikeout(false), _prev_bold(false)
 {
 	_dc.SetPen(context->GetTransparentPen());
@@ -713,7 +783,7 @@ void ConsolePainter::SetFillColor(const WinPortRGB &clr)
 void ConsolePainter::PrepareBackground(unsigned int cx, const WinPortRGB &clr, unsigned int nx)
 {
 	const bool cursor_here = (_cursor_props.visible && _cursor_props.blink_state
-		&& cx == (unsigned int)_cursor_props.pos.X
+		&& cx == _cursor_vis_x
 		&& _start_cy == (unsigned int)_cursor_props.pos.Y);
 
 	if (!cursor_here && _start_back_cx != (unsigned int)-1 && _clr_back == clr)
@@ -758,9 +828,10 @@ void ConsolePainter::FlushBackground(unsigned int cx_end)
 void ConsolePainter::FlushText(unsigned int cx_end)
 {
 	if (!_buffer.empty()) {
-		// RTL glyphs were already placed in visual (left-to-right) order by the
-		// bidi reorder; force LTR layout with a zero-width LEFT-TO-RIGHT OVERRIDE
-		// so the platform's DrawText does not reorder them again.
+		// Cells were already placed in visual (left-to-right) order by the bidi
+		// reorder. Force LTR layout with a zero-width LEFT-TO-RIGHT OVERRIDE so
+		// the platform's DrawText does not apply its own bidi/shaping to RTL runs
+		// (which would otherwise mangle spacing of narrow letters like yud/vav).
 		for (wxUniChar c : _buffer) {
 			if (c.GetValue() >= 0x0590) {
 				_buffer.Prepend(wxUniChar(0x202D));

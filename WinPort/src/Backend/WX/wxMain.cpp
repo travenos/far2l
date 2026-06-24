@@ -1852,8 +1852,15 @@ void WinPortPanel::OnMouse( wxMouseEvent &event )
 
 	if ((mode&ENABLE_QUICK_EDIT_MODE) || _adhoc_quickedit)
 		OnMouseQEdit( event, pos_char );
-	else if (mode&ENABLE_MOUSE_INPUT)
-		OnMouseNormal( event, pos_char );
+	else if (mode&ENABLE_MOUSE_INPUT) {
+		// The console buffer is in logical order while the GUI renders RTL rows
+		// reordered; map the clicked column back to logical so the core places
+		// the caret / extends selection on the intended character.
+		COORD pos_logical = pos_char;
+		pos_logical.X = (SHORT)_paint_context.BidiVisualColumnToLogical(
+			(unsigned int)pos_char.Y, (unsigned int)pos_char.X);
+		OnMouseNormal( event, pos_logical );
+	}
 }
 
 void WinPortPanel::OnMouseNormal( wxMouseEvent &event, COORD pos_char)

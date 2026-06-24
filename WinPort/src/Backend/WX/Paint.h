@@ -53,6 +53,7 @@ public:
 	uint8_t CharFitTest(wxPaintDC &dc, wchar_t wcz, unsigned int nx);
 	void ApplyFont(wxPaintDC &dc, uint8_t index = 0);
 	void OnPaint(wxPaintDC &dc, SMALL_RECT *qedit = NULL);
+	unsigned int BidiVisualColumnToLogical(unsigned int cy, unsigned int vis_x);
 	void RefreshArea( const SMALL_RECT &area );
 	void BlinkCursor();
 	void SetSharp(bool sharp);
@@ -102,6 +103,7 @@ class ConsolePainter
 	WinPortRGB _clr_text, _clr_back;
 	unsigned int _start_cx, _start_cy, _start_back_cx;
 	unsigned int _start_y;
+	unsigned int _cursor_vis_x;
 	uint8_t _prev_fit_font_index;
 	bool	_prev_underlined;
 	bool	_prev_strikeout;
@@ -121,6 +123,11 @@ public:
 
 
 	void NextChar(unsigned int cx, DWORD64 attributes, const wchar_t *wcz, unsigned int nx);
+
+	inline void SetCursorVisualX(unsigned int cx)
+	{
+		_cursor_vis_x = cx;
+	}
 
 	inline void LineBegin(unsigned int cy)
 	{
