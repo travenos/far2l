@@ -828,16 +828,6 @@ void ConsolePainter::FlushBackground(unsigned int cx_end)
 void ConsolePainter::FlushText(unsigned int cx_end)
 {
 	if (!_buffer.empty()) {
-		// Cells were already placed in visual (left-to-right) order by the bidi
-		// reorder. Force LTR layout with a zero-width LEFT-TO-RIGHT OVERRIDE so
-		// the platform's DrawText does not apply its own bidi/shaping to RTL runs
-		// (which would otherwise mangle spacing of narrow letters like yud/vav).
-		for (wxUniChar c : _buffer) {
-			if (c.GetValue() >= 0x0590) {
-				_buffer.Prepend(wxUniChar(0x202D));
-				break;
-			}
-		}
 		if (_prev_bold) {
 			wxFont normal = _dc.GetFont();
 			wxFont bold = normal;
@@ -1026,7 +1016,13 @@ void ConsolePainter::NextChar(unsigned int cx, DWORD64 attributes, const wchar_t
 
 	uint8_t fit_font_index = _context->CharFitTest(_dc, *wcz, nx);
 
-	if (fit_font_index == _prev_fit_font_index && _prev_underlined == underlined && _prev_strikeout == strikeout
+	// RTL glyphs must be drawn one cell at a time, pinned to their grid column.
+	// Batching them into a single DrawText lets the platform reflow/reshape the
+	// run (proportional advances, bidi, shaping), which causes gaps inside words
+	// and letters shifting when attributes change (e.g. on selection).
+	const bool is_rtl = BidiIsRTL(wcz[0]);
+
+	if (!is_rtl && fit_font_index == _prev_fit_font_index && _prev_underlined == underlined && _prev_strikeout == strikeout
 		&& _prev_bold == bold
 		&& _start_cx != (unsigned int)-1 && _clr_text == clr_text && _context->IsPaintBuffered())
 	{
@@ -1046,7 +1042,7 @@ void ConsolePainter::NextChar(unsigned int cx, DWORD64 attributes, const wchar_t
 	_buffer = wcz;
 	_clr_text = clr_text;
 
-	if (fit_font_index != 0 && fit_font_index != 0xff) {
+	if (is_rtl || (fit_font_index != 0 && fit_font_index != 0xff)) {
 		_context->ApplyFont(_dc, fit_font_index);
 		FlushText(cx + nx);
 		_context->ApplyFont(_dc);
