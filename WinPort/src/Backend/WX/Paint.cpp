@@ -8,6 +8,7 @@
 #include "PathHelpers.h"
 #include "WinPort.h"
 #include <utils.h>
+#include <wctype.h>
 
 #define COLOR_ATTRIBUTES ( FOREGROUND_INTENSITY | BACKGROUND_INTENSITY | \
 					FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE | \
@@ -330,6 +331,119 @@ void ConsolePaintContext::ApplyFont(wxPaintDC &dc, uint8_t index)
 		dc.SetFont(_fonts[index]);
 }
 
+/////////////////////////////////////////////////////////////////////////////////
+// Minimal Unicode-Bidi-style reordering of a console line into visual order.
+// Base direction is LTR so the overall UI layout (frames, columns, ASCII) stays
+// intact, while RTL runs (Hebrew/Arabic/...) are reversed in place - including
+// word order across spaces - and embedded numbers/LTR text keep natural order.
+
+enum BidiClass : uint8_t { BIDI_L, BIDI_R, BIDI_NUM, BIDI_NEUTRAL };
+
+static inline wchar_t BidiCellBaseChar(const CHAR_INFO &ci)
+{
+	if (UNLIKELY(CI_USING_COMPOSITE_CHAR(ci))) {
+		const wchar_t *pwc = WINPORT(CompositeCharLookup)(ci.Char.UnicodeChar);
+		return pwc ? pwc[0] : 0;
+	}
+	return (wchar_t)ci.Char.UnicodeChar;
+}
+
+static inline bool BidiIsRTL(wchar_t wc)
+{
+	return (wc >= 0x0590 && wc <= 0x05FF)   // Hebrew
+		|| (wc >= 0x0600 && wc <= 0x07BF)   // Arabic, Syriac, Thaana, NKo
+		|| (wc >= 0x0800 && wc <= 0x085F)   // Samaritan, Mandaic
+		|| (wc >= 0x08A0 && wc <= 0x08FF)   // Arabic Extended-A
+		|| (wc >= 0xFB1D && wc <= 0xFB4F)   // Hebrew presentation forms
+		|| (wc >= 0xFB50 && wc <= 0xFDFF)   // Arabic presentation forms-A
+		|| (wc >= 0xFE70 && wc <= 0xFEFF);  // Arabic presentation forms-B
+}
+
+static inline bool BidiIsNum(wchar_t wc)
+{
+	return (wc >= 0x0030 && wc <= 0x0039)   // ASCII digits
+		|| (wc >= 0x0660 && wc <= 0x0669)   // Arabic-Indic digits
+		|| (wc >= 0x06F0 && wc <= 0x06F9);  // Extended Arabic-Indic digits
+}
+
+static inline BidiClass BidiClassify(const CHAR_INFO &ci)
+{
+	const wchar_t wc = BidiCellBaseChar(ci);
+	if (BidiIsRTL(wc)) return BIDI_R;
+	if (BidiIsNum(wc)) return BIDI_NUM;
+	// Empty cells, whitespace and ASCII punctuation/symbols are neutral so they
+	// can join a surrounding RTL run; everything else (Latin, CJK, ...) is LTR.
+	if (wc == 0 || (wc < 0x80 && !iswalpha(wc)))
+		return BIDI_NEUTRAL;
+	return BIDI_L;
+}
+
+static void BidiReorderLine(CHAR_INFO *line, unsigned int cw)
+{
+	bool has_rtl = false;
+	for (unsigned int i = 0; i < cw; ++i) {
+		if (BidiClassify(line[i]) == BIDI_R) {
+			has_rtl = true;
+			break;
+		}
+	}
+	if (!has_rtl)
+		return;
+
+	std::vector<BidiClass> cls(cw);
+	std::vector<uint8_t> levels(cw, 0);  // embedding level per cell, base 0
+	for (unsigned int i = 0; i < cw; ++i)
+		cls[i] = BidiClassify(line[i]);
+
+	// Resolve embedding levels: strong RTL -> 1, strong LTR -> 0, and each
+	// maximal run of weak/neutral cells adopts the RTL context only when it is
+	// surrounded by RTL on both sides (numbers stay LTR at level 2).
+	unsigned int max_level = 0;
+	for (unsigned int i = 0; i < cw; ) {
+		if (cls[i] == BIDI_R) {
+			levels[i] = 1;
+			if (max_level < 1) max_level = 1;
+			++i;
+		} else if (cls[i] == BIDI_L) {
+			levels[i] = 0;
+			++i;
+		} else {
+			const unsigned int run_begin = i;
+			while (i < cw && cls[i] != BIDI_R && cls[i] != BIDI_L)
+				++i;
+			const bool left_rtl = (run_begin > 0 && cls[run_begin - 1] == BIDI_R);
+			const bool right_rtl = (i < cw && cls[i] == BIDI_R);
+			if (left_rtl && right_rtl) {
+				for (unsigned int j = run_begin; j < i; ++j) {
+					levels[j] = (cls[j] == BIDI_NUM) ? 2 : 1;
+					if (max_level < levels[j]) max_level = levels[j];
+				}
+			}
+		}
+	}
+
+	// UBA rule L2: from the highest level down to 1, reverse every contiguous
+	// run of cells whose level is >= that level.
+	for (unsigned int lev = max_level; lev >= 1; --lev) {
+		for (unsigned int i = 0; i < cw; ) {
+			if (levels[i] < lev) {
+				++i;
+				continue;
+			}
+			const unsigned int run_begin = i;
+			while (i < cw && levels[i] >= lev)
+				++i;
+			unsigned int l = run_begin, r = i - 1;
+			while (l < r) {
+				std::swap(line[l], line[r]);
+				std::swap(levels[l], levels[r]);
+				++l;
+				--r;
+			}
+		}
+	}
+}
+
 void ConsolePaintContext::OnPaint(wxPaintDC &dc, SMALL_RECT *qedit)
 {
 	if (UNLIKELY(_stage == STG_NOT_REFRESHED)) {
@@ -405,6 +519,8 @@ void ConsolePaintContext::OnPaint(wxPaintDC &dc, SMALL_RECT *qedit)
 			line = &_line[0];
 		}
 
+		BidiReorderLine(&_line[0], cw);
+
 		painter.LineBegin(cy);
 		wchar_t tmp_wcz[2] = {0, 0};
 		DWORD64 attributes = line->Attributes;
@@ -468,11 +584,41 @@ void ConsolePaintContext::RefreshArea( const SMALL_RECT &area )
 		_stage = STG_REFRESHED;
 	}
 
+	SMALL_RECT ex_area = area;
+
+	// Bidi reordering is whole-line, so changing a single cell may move the
+	// visual position of other glyphs on the same row. Expand the refresh to the
+	// full row width for rows that contain RTL text, otherwise partial repaints
+	// would leave stale (ghost) glyphs behind.
+	unsigned int cw, ch;
+	g_winport_con_out->GetSize(cw, ch);
+	for (int cy = area.Top; cy <= area.Bottom; ++cy) {
+		if (cy < 0 || (unsigned)cy >= ch)
+			continue;
+		bool has_rtl = false;
+		{
+			IConsoleOutput::DirectLineAccess dla(g_winport_con_out, cy);
+			const CHAR_INFO *line = dla.Line();
+			const unsigned int w = line ? std::min(dla.Width(), cw) : 0;
+			for (unsigned int cx = 0; cx < w; ++cx) {
+				if (BidiIsRTL(BidiCellBaseChar(line[cx]))) {
+					has_rtl = true;
+					break;
+				}
+			}
+		}
+		if (has_rtl) {
+			ex_area.Left = 0;
+			ex_area.Right = (SHORT)(cw - 1);
+			break;
+		}
+	}
+
 	wxRect rc;
-	rc.SetLeft(((int)area.Left) * _font_width);
-	rc.SetRight(((int)area.Right) * _font_width + _font_width - 1);
-	rc.SetTop(((int)area.Top) * _font_height);
-	rc.SetBottom(((int)area.Bottom) * _font_height + _font_height - 1);
+	rc.SetLeft(((int)ex_area.Left) * _font_width);
+	rc.SetRight(((int)ex_area.Right) * _font_width + _font_width - 1);
+	rc.SetTop(((int)ex_area.Top) * _font_height);
+	rc.SetBottom(((int)ex_area.Bottom) * _font_height + _font_height - 1);
 	_window->Refresh(false, &rc);
 }
 
@@ -612,6 +758,15 @@ void ConsolePainter::FlushBackground(unsigned int cx_end)
 void ConsolePainter::FlushText(unsigned int cx_end)
 {
 	if (!_buffer.empty()) {
+		// RTL glyphs were already placed in visual (left-to-right) order by the
+		// bidi reorder; force LTR layout with a zero-width LEFT-TO-RIGHT OVERRIDE
+		// so the platform's DrawText does not reorder them again.
+		for (wxUniChar c : _buffer) {
+			if (c.GetValue() >= 0x0590) {
+				_buffer.Prepend(wxUniChar(0x202D));
+				break;
+			}
+		}
 		if (_prev_bold) {
 			wxFont normal = _dc.GetFont();
 			wxFont bold = normal;
