@@ -414,17 +414,14 @@ static bool BidiReorderLine(CHAR_INFO *line, unsigned int cw, unsigned int *vis2
 		cls[i] = BidiClassify(line[i]);
 
 	// Resolve embedding levels (base LTR, level 0). Strong RTL cells get level 1.
-	// Any maximal run of non-RTL cells (LTR letters, numbers, neutrals) that is
-	// surrounded by RTL on both sides is an island embedded in the RTL flow: its
-	// LTR/number cells get level 2 (kept left-to-right but repositioned inside the
-	// RTL run) and its neutrals get level 1 (so they reverse with the run). This
-	// makes embedded Latin words and numbers behave the same way and land where
-	// the caret is. Non-surrounded LTR/neutral content stays at base level 0.
-	unsigned int max_level = 0;
+	// Any maximal run of non-RTL cells surrounded by RTL on both sides is an
+	// island in the RTL flow. LTR/number islands are uniformly level 2 (spaces
+	// included) so a later level-1 pass never touches them. Pure-neutral runs
+	// (e.g. a space between Hebrew words) get level 1 and reverse with the RTL
+	// run. Non-surrounded LTR/neutral content stays at base level 0.
 	for (unsigned int i = 0; i < cw; ) {
 		if (cls[i] == BIDI_R) {
 			levels[i] = 1;
-			if (max_level < 1) max_level = 1;
 			++i;
 		} else if (cls[i] == BIDI_BOUND) {
 			levels[i] = 0;  // service glyph: stays in place, breaks the RTL run
@@ -436,17 +433,25 @@ static bool BidiReorderLine(CHAR_INFO *line, unsigned int cw, unsigned int *vis2
 			const bool left_rtl = (run_begin > 0 && cls[run_begin - 1] == BIDI_R);
 			const bool right_rtl = (i < cw && cls[i] == BIDI_R);
 			if (left_rtl && right_rtl) {
+				bool has_ltr = false;
 				for (unsigned int j = run_begin; j < i; ++j) {
-					levels[j] = (cls[j] == BIDI_NEUTRAL) ? 1 : 2;
-					if (max_level < levels[j]) max_level = levels[j];
+					if (cls[j] == BIDI_L || cls[j] == BIDI_NUM) {
+						has_ltr = true;
+						break;
+					}
 				}
+				const uint8_t run_level = has_ltr ? 2 : 1;
+				for (unsigned int j = run_begin; j < i; ++j)
+					levels[j] = run_level;
 			}
 		}
 	}
 
 	// UBA rule L2: from the highest level down to 1, reverse every contiguous
-	// run of cells whose level is >= that level.
-	for (unsigned int lev = max_level; lev >= 1; --lev) {
+	// run of cells whose level is >= that level. LTR islands are uniformly level
+	// 2 so the level-2 pass flips them once and the level-1 pass flips them back,
+	// leaving Latin word order intact while each level-1 RTL block still reverses.
+	for (unsigned int lev = 2; lev >= 1; --lev) {
 		for (unsigned int i = 0; i < cw; ) {
 			if (levels[i] < lev) {
 				++i;
