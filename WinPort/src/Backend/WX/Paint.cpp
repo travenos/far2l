@@ -8,7 +8,7 @@
 #include "PathHelpers.h"
 #include "WinPort.h"
 #include <utils.h>
-#include <wctype.h>
+#include "ConsoleBidi.h"
 
 #define COLOR_ATTRIBUTES ( FOREGROUND_INTENSITY | BACKGROUND_INTENSITY | \
 					FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE | \
@@ -331,172 +331,9 @@ void ConsolePaintContext::ApplyFont(wxPaintDC &dc, uint8_t index)
 		dc.SetFont(_fonts[index]);
 }
 
-/////////////////////////////////////////////////////////////////////////////////
-// Minimal Unicode-Bidi-style reordering of a console line into visual order.
-// Base direction is LTR so the overall UI layout (frames, columns, ASCII) stays
-// intact, while RTL runs (Hebrew/Arabic/...) are reversed in place - including
-// word order across spaces - and embedded numbers/LTR text keep natural order.
-
-// BIDI_BOUND covers UI/service glyphs (box drawing, separators, blocks, any
-// non-letter symbol): they must always keep their cell and never be reordered.
-enum BidiClass : uint8_t { BIDI_L, BIDI_R, BIDI_NUM, BIDI_NEUTRAL, BIDI_BOUND };
-
-static inline wchar_t BidiCellBaseChar(const CHAR_INFO &ci)
-{
-	if (UNLIKELY(CI_USING_COMPOSITE_CHAR(ci))) {
-		const wchar_t *pwc = WINPORT(CompositeCharLookup)(ci.Char.UnicodeChar);
-		return pwc ? pwc[0] : 0;
-	}
-	return (wchar_t)ci.Char.UnicodeChar;
-}
-
-static inline bool BidiIsRTL(wchar_t wc)
-{
-	return (wc >= 0x0590 && wc <= 0x05FF)   // Hebrew
-		|| (wc >= 0x0600 && wc <= 0x07BF)   // Arabic, Syriac, Thaana, NKo
-		|| (wc >= 0x0800 && wc <= 0x085F)   // Samaritan, Mandaic
-		|| (wc >= 0x08A0 && wc <= 0x08FF)   // Arabic Extended-A
-		|| (wc >= 0xFB1D && wc <= 0xFB4F)   // Hebrew presentation forms
-		|| (wc >= 0xFB50 && wc <= 0xFDFF)   // Arabic presentation forms-A
-		|| (wc >= 0xFE70 && wc <= 0xFEFF);  // Arabic presentation forms-B
-}
-
-static inline bool BidiIsNum(wchar_t wc)
-{
-	return (wc >= 0x0030 && wc <= 0x0039)   // ASCII digits
-		|| (wc >= 0x0660 && wc <= 0x0669)   // Arabic-Indic digits
-		|| (wc >= 0x06F0 && wc <= 0x06F9);  // Extended Arabic-Indic digits
-}
-
-static inline BidiClass BidiClassify(const CHAR_INFO &ci)
-{
-	const wchar_t wc = BidiCellBaseChar(ci);
-	if (wc == 0)
-		return BIDI_NEUTRAL;
-	if (BidiIsRTL(wc))
-		return BIDI_R;
-	if (BidiIsNum(wc))
-		return BIDI_NUM;
-	// Real letters are content that can participate in reordering (e.g. a Latin
-	// word embedded in Hebrew); empty/whitespace/ASCII punctuation are neutral
-	// and join the surrounding run. Anything else (box drawing, separators and
-	// other graphical/service glyphs of any code) must stay where it is.
-	if (iswalpha((wint_t)wc))
-		return BIDI_L;
-	if (iswspace((wint_t)wc) || wc < 0x80)
-		return BIDI_NEUTRAL;
-	return BIDI_BOUND;
-}
-
-// Reorders a console line into visual order. When vis2log != nullptr it is
-// filled (size cw) so that vis2log[v] is the logical column shown at visual
-// column v (identity when the line has no RTL). Returns true if reordered.
-static bool BidiReorderLine(CHAR_INFO *line, unsigned int cw, unsigned int *vis2log = nullptr)
-{
-	if (vis2log) {
-		for (unsigned int i = 0; i < cw; ++i)
-			vis2log[i] = i;
-	}
-
-	bool has_rtl = false;
-	for (unsigned int i = 0; i < cw; ++i) {
-		if (BidiClassify(line[i]) == BIDI_R) {
-			has_rtl = true;
-			break;
-		}
-	}
-	if (!has_rtl)
-		return false;
-
-	std::vector<BidiClass> cls(cw);
-	std::vector<uint8_t> levels(cw, 0);  // embedding level per cell, base 0
-	for (unsigned int i = 0; i < cw; ++i)
-		cls[i] = BidiClassify(line[i]);
-
-	// Resolve embedding levels (base LTR, level 0). Strong RTL cells get level 1.
-	// Any maximal run of non-RTL cells surrounded by RTL on both sides is an
-	// island in the RTL flow. LTR/number islands are uniformly level 2 (spaces
-	// included) so a later level-1 pass never touches them. Pure-neutral runs
-	// (e.g. a space between Hebrew words) get level 1 and reverse with the RTL
-	// run. Non-surrounded LTR/neutral content stays at base level 0.
-	for (unsigned int i = 0; i < cw; ) {
-		if (cls[i] == BIDI_R) {
-			levels[i] = 1;
-			++i;
-		} else if (cls[i] == BIDI_BOUND) {
-			levels[i] = 0;  // service glyph: stays in place, breaks the RTL run
-			++i;
-		} else {
-			const unsigned int run_begin = i;
-			while (i < cw && cls[i] != BIDI_R && cls[i] != BIDI_BOUND)
-				++i;
-			const bool left_rtl = (run_begin > 0 && cls[run_begin - 1] == BIDI_R);
-			const bool right_rtl = (i < cw && cls[i] == BIDI_R);
-			if (left_rtl && right_rtl) {
-				bool has_ltr = false;
-				for (unsigned int j = run_begin; j < i; ++j) {
-					if (cls[j] == BIDI_L || cls[j] == BIDI_NUM) {
-						has_ltr = true;
-						break;
-					}
-				}
-				const uint8_t run_level = has_ltr ? 2 : 1;
-				for (unsigned int j = run_begin; j < i; ++j)
-					levels[j] = run_level;
-			}
-		}
-	}
-
-	// UBA rule L2: from the highest level down to 1, reverse every contiguous
-	// run of cells whose level is >= that level. LTR islands are uniformly level
-	// 2 so the level-2 pass flips them once and the level-1 pass flips them back,
-	// leaving Latin word order intact while each level-1 RTL block still reverses.
-	for (unsigned int lev = 2; lev >= 1; --lev) {
-		for (unsigned int i = 0; i < cw; ) {
-			if (levels[i] < lev) {
-				++i;
-				continue;
-			}
-			const unsigned int run_begin = i;
-			while (i < cw && levels[i] >= lev)
-				++i;
-			unsigned int l = run_begin, r = i - 1;
-			while (l < r) {
-				std::swap(line[l], line[r]);
-				std::swap(levels[l], levels[r]);
-				if (vis2log)
-					std::swap(vis2log[l], vis2log[r]);
-				++l;
-				--r;
-			}
-		}
-	}
-	return true;
-}
-
 unsigned int ConsolePaintContext::BidiVisualColumnToLogical(unsigned int cy, unsigned int vis_x)
 {
-	unsigned int cw, ch;
-	g_winport_con_out->GetSize(cw, ch);
-	if (cy >= ch || vis_x >= cw)
-		return vis_x;
-
-	std::vector<CHAR_INFO> tmp(cw);
-	{
-		IConsoleOutput::DirectLineAccess dla(g_winport_con_out, cy);
-		const CHAR_INFO *line = dla.Line();
-		const unsigned int w = line ? std::min(dla.Width(), cw) : 0;
-		if (w)
-			memcpy(&tmp[0], line, w * sizeof(CHAR_INFO));
-		if (w < cw)
-			memset(&tmp[w], 0, (cw - w) * sizeof(CHAR_INFO));
-	}
-
-	std::vector<unsigned int> vis2log(cw);
-	if (!BidiReorderLine(&tmp[0], cw, &vis2log[0]))
-		return vis_x;
-
-	return vis2log[vis_x];
+	return ConsoleBidi::VisualColumnToLogical(cy, vis_x);
 }
 
 void ConsolePaintContext::OnPaint(wxPaintDC &dc, SMALL_RECT *qedit)
@@ -577,7 +414,7 @@ void ConsolePaintContext::OnPaint(wxPaintDC &dc, SMALL_RECT *qedit)
 
 		const bool is_cursor_row = (_cursor_props.visible
 			&& (unsigned int)_cursor_props.pos.Y == cy);
-		const bool had_rtl = BidiReorderLine(&_line[0], cw,
+		const bool had_rtl = ConsoleBidi::ReorderLine(&_line[0], cw,
 			is_cursor_row ? &vis2log[0] : nullptr);
 
 		if (is_cursor_row) {
@@ -659,34 +496,7 @@ void ConsolePaintContext::RefreshArea( const SMALL_RECT &area )
 	}
 
 	SMALL_RECT ex_area = area;
-
-	// Bidi reordering is whole-line, so changing a single cell may move the
-	// visual position of other glyphs on the same row. Expand the refresh to the
-	// full row width for rows that contain RTL text, otherwise partial repaints
-	// would leave stale (ghost) glyphs behind.
-	unsigned int cw, ch;
-	g_winport_con_out->GetSize(cw, ch);
-	for (int cy = area.Top; cy <= area.Bottom; ++cy) {
-		if (cy < 0 || (unsigned)cy >= ch)
-			continue;
-		bool has_rtl = false;
-		{
-			IConsoleOutput::DirectLineAccess dla(g_winport_con_out, cy);
-			const CHAR_INFO *line = dla.Line();
-			const unsigned int w = line ? std::min(dla.Width(), cw) : 0;
-			for (unsigned int cx = 0; cx < w; ++cx) {
-				if (BidiIsRTL(BidiCellBaseChar(line[cx]))) {
-					has_rtl = true;
-					break;
-				}
-			}
-		}
-		if (has_rtl) {
-			ex_area.Left = 0;
-			ex_area.Right = (SHORT)(cw - 1);
-			break;
-		}
-	}
+	ConsoleBidi::ExpandDirtyArea(ex_area);
 
 	wxRect rc;
 	rc.SetLeft(((int)ex_area.Left) * _font_width);
@@ -1025,7 +835,7 @@ void ConsolePainter::NextChar(unsigned int cx, DWORD64 attributes, const wchar_t
 	// Batching them into a single DrawText lets the platform reflow/reshape the
 	// run (proportional advances, bidi, shaping), which causes gaps inside words
 	// and letters shifting when attributes change (e.g. on selection).
-	const bool is_rtl = BidiIsRTL(wcz[0]);
+	const bool is_rtl = ConsoleBidi::IsRTL(wcz[0]);
 
 	if (!is_rtl && fit_font_index == _prev_fit_font_index && _prev_underlined == underlined && _prev_strikeout == strikeout
 		&& _prev_bold == bold

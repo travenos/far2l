@@ -11,6 +11,7 @@
 #include "SDLShared.h"
 #include "SDLConsoleRenderer.hpp"
 #include "SDLBackendUtils.h"
+#include "ConsoleBidi.h"
 #include "SDLFontManager.h"
 #include "SDLPrinterSupport.h"
 
@@ -336,6 +337,7 @@ public:
 		for (const auto &area_in : areas) {
 			SMALL_RECT area = area_in;
 			NormalizeArea(area);
+			ConsoleBidi::ExpandDirtyArea(area);
 			if (area.Left > area.Right || area.Top > area.Bottom) {
 				continue;
 			}
@@ -2106,13 +2108,18 @@ void SDLConsoleBackend::HandleMouseMotion(const SDL_MouseMotionEvent &motion)
 	if (!g_winport_con_in) {
 		return;
 	}
-	const SHORT col = ClampColumn(motion.x);
+	SHORT col = ClampColumn(motion.x);
 	const SHORT row = ClampRow(motion.y);
 	_last_mouse_pos = {col, row};
 	if (_mouse_qedit_start_ticks != 0) {
 		UpdateMouseQEdit(_last_mouse_pos, true, false);
 		return;
 	}
+	DWORD mode = 0;
+	if (WINPORT(GetConsoleMode)(NULL, &mode) && (mode & ENABLE_MOUSE_INPUT)) {
+		col = (SHORT)ConsoleBidi::VisualColumnToLogical((unsigned int)row, (unsigned int)col);
+	}
+	_last_mouse_pos.X = col;
 	EmitMouseEvent(_mouse_button_state, MOUSE_MOVED, col, row);
 }
 
@@ -2137,8 +2144,8 @@ void SDLConsoleBackend::HandleMouseButton(const SDL_MouseButtonEvent &button)
 	} else {
 		_mouse_button_state &= ~mask;
 	}
-	const SHORT col = ClampColumn(button.x);
 	const SHORT row = ClampRow(button.y);
+	SHORT col = ClampColumn(button.x);
 	_last_mouse_pos = {col, row};
 	if (_adhoc_quickedit || _mouse_qedit_start_ticks != 0) {
 		if (button.button == SDL_BUTTON_LEFT) {
@@ -2150,6 +2157,11 @@ void SDLConsoleBackend::HandleMouseButton(const SDL_MouseButtonEvent &button)
 		}
 		return;
 	}
+	DWORD mode = 0;
+	if (WINPORT(GetConsoleMode)(NULL, &mode) && (mode & ENABLE_MOUSE_INPUT)) {
+		col = (SHORT)ConsoleBidi::VisualColumnToLogical((unsigned int)row, (unsigned int)col);
+	}
+	_last_mouse_pos.X = col;
 	EmitMouseEvent(_mouse_button_state, event_flags, col, row);
 }
 

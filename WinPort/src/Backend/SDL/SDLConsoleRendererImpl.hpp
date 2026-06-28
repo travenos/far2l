@@ -4,6 +4,7 @@
 
 #include "SDLShared.h"
 #include "SDLBackendUtils.h"
+#include "ConsoleBidi.h"
 #include "SDLImageManager.h"
 #include "SDLFontManager.h"
 #include "utils.h"
@@ -421,21 +422,7 @@ public:
 		_present_dirty_rects.clear();
 
 		for (unsigned int row = 0; row < _rows; ++row) {
-			IConsoleOutput::DirectLineAccess dla(g_winport_con_out, row);
-			const CHAR_INFO *line = dla.Line();
-			const unsigned int width = dla.Width();
-			if (!line || !width) {
-				continue;
-			}
-			unsigned int col = 0;
-			while (col < width) {
-				if (col > 0 && line[col].Char.UnicodeChar == 0 && CI_FULL_WIDTH_CHAR(line[col - 1])) {
-					++col;
-					continue;
-				}
-				DrawCell(col, row, line[col]);
-				col += CI_FULL_WIDTH_CHAR(line[col]) ? 2 : 1;
-			}
+			DrawVisualLine(row, 0, (SHORT)(_cols > 0 ? _cols - 1 : 0));
 		}
 	}
 
@@ -520,7 +507,9 @@ public:
 				if (pos.X < 0 || pos.Y < 0 || pos.X >= (SHORT)_cols || pos.Y >= (SHORT)_rows) {
 					return;
 				}
-				SDL_Rect rect = CellRectToPixelRect(layout, pos.X, pos.Y, 1, 1);
+				const unsigned int vis_x = ConsoleBidi::LogicalColumnToVisual(
+					(unsigned int)pos.Y, (unsigned int)pos.X, _cols);
+				SDL_Rect rect = CellRectToPixelRect(layout, (int)vis_x, pos.Y, 1, 1);
 				if (rect.w > 0 && rect.h > 0) {
 					_present_dirty_rects.push_back(rect);
 				}
@@ -844,30 +833,60 @@ const RenderLayout &ResolveLayout() const
         }
 
         for (SHORT row = top; row <= bottom; ++row) {
-            IConsoleOutput::DirectLineAccess dla(g_winport_con_out, row);
-            const CHAR_INFO *line = dla.Line();
-            if (!line) {
-                continue;
-            }
-
-            const unsigned int width = dla.Width();
-            if (!width) {
-                continue;
-            }
-
-            const SHORT max_col = static_cast<SHORT>(width - 1);
-            const SHORT col_end = std::min(right, max_col);
-            SHORT col = left;
-            while (col <= col_end) {
-                if (col > 0 && line[col].Char.UnicodeChar == 0 && CI_FULL_WIDTH_CHAR(line[col - 1])) {
-                    ++col;
-                    continue;
-                }
-                DrawCell(col, row, line[col]);
-                col += CI_FULL_WIDTH_CHAR(line[col]) ? 2 : 1;
-            }
+			DrawVisualLine((unsigned int)row, left, right);
         }
     }
+
+	const CHAR_INFO *PrepareVisualLine(unsigned int row, unsigned int *vis2log_out = nullptr)
+	{
+		IConsoleOutput::DirectLineAccess dla(g_winport_con_out, row);
+		const CHAR_INFO *src = dla.Line();
+		const unsigned int src_w = src ? dla.Width() : 0;
+		if (_line.size() < _cols)
+			_line.resize(_cols);
+		const unsigned int copy_w = std::min(src_w, _cols);
+		if (copy_w)
+			memcpy(&_line[0], src, copy_w * sizeof(CHAR_INFO));
+		if (copy_w < _cols)
+			memset(&_line[copy_w], 0, (_cols - copy_w) * sizeof(CHAR_INFO));
+		ConsoleBidi::ReorderLine(&_line[0], _cols, vis2log_out);
+		return &_line[0];
+	}
+
+	void DrawVisualLine(unsigned int row, SHORT col_left, SHORT col_right)
+	{
+		if (col_left > col_right)
+			return;
+
+		unsigned int *vis2log_ptr = nullptr;
+		UCHAR cursor_height = 0;
+		bool cursor_visible = false;
+		COORD cursor_pos = g_winport_con_out->GetCursor(cursor_height, cursor_visible);
+		const bool is_cursor_row = cursor_visible && (unsigned int)cursor_pos.Y == row;
+		if (is_cursor_row) {
+			if (_vis2log.size() < _cols)
+				_vis2log.resize(_cols);
+			vis2log_ptr = &_vis2log[0];
+		}
+
+		const CHAR_INFO *line = PrepareVisualLine(row, vis2log_ptr);
+		if (!line)
+			return;
+
+		if (is_cursor_row && (unsigned int)cursor_pos.X < _cols) {
+			_cursor_vis_x = ConsoleBidi::LogicalColumnToVisual(row, (unsigned int)cursor_pos.X, _cols);
+		}
+
+		SHORT col = col_left;
+		while (col <= col_right) {
+			if (col > 0 && line[col].Char.UnicodeChar == 0 && CI_FULL_WIDTH_CHAR(line[col - 1])) {
+				++col;
+				continue;
+			}
+			DrawCell(col, row, line[col]);
+			col += CI_FULL_WIDTH_CHAR(line[col]) ? 2 : 1;
+		}
+	}
 
 	void DrawCell(int col, int row, const CHAR_INFO &ci)
     {
@@ -1205,6 +1224,9 @@ const RenderLayout &ResolveLayout() const
 	bool _last_tex_blend_valid{false};
 	bool _qedit_active{false};
 	SMALL_RECT _qedit_rect{};
+	std::vector<CHAR_INFO> _line;
+	std::vector<unsigned int> _vis2log;
+	unsigned int _cursor_vis_x{0};
 
 	void SetDrawColorCached(const SDL_Color &color)
 	{
@@ -1293,7 +1315,9 @@ const RenderLayout &ResolveLayout() const
 		const WinPortRGB bg = SDLConsoleBackground2RGB(ci.Attributes);
 		SDL_Color cursor_color{Uint8(bg.r ^ 0xff), Uint8(bg.g ^ 0xff), Uint8(bg.b ^ 0xff), 255};
 
-		const int px = CellToPixelX(layout, pos.X);
+		const unsigned int vis_x = ConsoleBidi::LogicalColumnToVisual(
+			(unsigned int)pos.Y, (unsigned int)pos.X, _cols);
+		const int px = CellToPixelX(layout, (int)vis_x);
 		const int py = CellToPixelY(layout, pos.Y);
 		const int cell_h = layout.cell_px_h;
 
@@ -1327,18 +1351,10 @@ const RenderLayout &ResolveLayout() const
 		}
 
 		for (SHORT row = top; row <= bottom; ++row) {
-			IConsoleOutput::DirectLineAccess dla(g_winport_con_out, row);
-			const CHAR_INFO *line = dla.Line();
-			if (!line) {
+			const CHAR_INFO *line = PrepareVisualLine((unsigned int)row);
+			if (!line)
 				continue;
-			}
-			const unsigned int width = dla.Width();
-			if (!width) {
-				continue;
-			}
-			const SHORT max_col = static_cast<SHORT>(width - 1);
-			const SHORT col_end = std::min(right, max_col);
-			for (SHORT col = left; col <= col_end; ++col) {
+			for (SHORT col = left; col <= right; ++col) {
 				if (col > 0 && line[col].Char.UnicodeChar == 0 && CI_FULL_WIDTH_CHAR(line[col - 1])) {
 					continue;
 				}
