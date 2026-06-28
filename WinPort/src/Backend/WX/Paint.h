@@ -53,7 +53,6 @@ public:
 	uint8_t CharFitTest(wxPaintDC &dc, wchar_t wcz, unsigned int nx);
 	void ApplyFont(wxPaintDC &dc, uint8_t index = 0);
 	void OnPaint(wxPaintDC &dc, SMALL_RECT *qedit = NULL);
-	unsigned int BidiVisualColumnToLogical(unsigned int cy, unsigned int vis_x);
 	void RefreshArea( const SMALL_RECT &area );
 	void BlinkCursor();
 	void SetSharp(bool sharp);

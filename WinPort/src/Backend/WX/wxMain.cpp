@@ -7,6 +7,7 @@
 #include <vector>
 #include <memory>
 #include "wxPrinterSupport.h"
+#include "ConsoleBidi.h"
 
 #define AREAS_REDUCTION
 
@@ -1857,7 +1858,7 @@ void WinPortPanel::OnMouse( wxMouseEvent &event )
 		// reordered; map the clicked column back to logical so the core places
 		// the caret / extends selection on the intended character.
 		COORD pos_logical = pos_char;
-		pos_logical.X = (SHORT)_paint_context.BidiVisualColumnToLogical(
+		pos_logical.X = (SHORT)ConsoleBidi::VisualColumnToLogical(
 			(unsigned int)pos_char.Y, (unsigned int)pos_char.X);
 		OnMouseNormal( event, pos_logical );
 	}

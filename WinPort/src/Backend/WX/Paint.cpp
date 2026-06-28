@@ -331,11 +331,6 @@ void ConsolePaintContext::ApplyFont(wxPaintDC &dc, uint8_t index)
 		dc.SetFont(_fonts[index]);
 }
 
-unsigned int ConsolePaintContext::BidiVisualColumnToLogical(unsigned int cy, unsigned int vis_x)
-{
-	return ConsoleBidi::VisualColumnToLogical(cy, vis_x);
-}
-
 void ConsolePaintContext::OnPaint(wxPaintDC &dc, SMALL_RECT *qedit)
 {
 	if (UNLIKELY(_stage == STG_NOT_REFRESHED)) {
