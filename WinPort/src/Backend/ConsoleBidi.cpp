@@ -1,6 +1,7 @@
 #include "ConsoleBidi.h"
 
 #include <algorithm>
+#include <cstdint>
 #include <cstring>
 #include <vector>
 #include <wctype.h>
@@ -11,8 +12,14 @@
 
 namespace ConsoleBidi
 {
+namespace
+{
 
-static wchar_t CellBaseChar(const CHAR_INFO &ci)
+// BIDI_BOUND covers UI/service glyphs (box drawing, separators, blocks, any
+// non-letter symbol): they must always keep their cell and never be reordered.
+enum BidiClass : uint8_t { BIDI_L, BIDI_R, BIDI_NUM, BIDI_NEUTRAL, BIDI_BOUND };
+
+wchar_t CellBaseChar(const CHAR_INFO &ci)
 {
 	if (UNLIKELY(CI_USING_COMPOSITE_CHAR(ci))) {
 		const wchar_t *pwc = WINPORT(CompositeCharLookup)(ci.Char.UnicodeChar);
@@ -21,14 +28,14 @@ static wchar_t CellBaseChar(const CHAR_INFO &ci)
 	return (wchar_t)ci.Char.UnicodeChar;
 }
 
-static bool IsNum(wchar_t wc)
+bool IsNum(wchar_t wc)
 {
 	return (wc >= 0x0030 && wc <= 0x0039)   // ASCII digits
 		|| (wc >= 0x0660 && wc <= 0x0669)   // Arabic-Indic digits
 		|| (wc >= 0x06F0 && wc <= 0x06F9);  // Extended Arabic-Indic digits
 }
 
-static Class Classify(const CHAR_INFO &ci)
+BidiClass Classify(const CHAR_INFO &ci)
 {
 	const wchar_t wc = CellBaseChar(ci);
 	if (wc == 0)
@@ -44,7 +51,7 @@ static Class Classify(const CHAR_INFO &ci)
 	return BIDI_BOUND;
 }
 
-static void CopyConsoleLine(unsigned int cy, unsigned int cw, CHAR_INFO *line_buf)
+void CopyConsoleLine(unsigned int cy, unsigned int cw, CHAR_INFO *line_buf)
 {
 	IConsoleOutput::DirectLineAccess dla(g_winport_con_out, cy);
 	const CHAR_INFO *line = dla.Line();
@@ -54,6 +61,28 @@ static void CopyConsoleLine(unsigned int cy, unsigned int cw, CHAR_INFO *line_bu
 	if (w < cw)
 		memset(line_buf + w, 0, (cw - w) * sizeof(CHAR_INFO));
 }
+
+bool RowHasRTL(unsigned int cy)
+{
+	if (!g_winport_con_out)
+		return false;
+
+	unsigned int cw, ch;
+	g_winport_con_out->GetSize(cw, ch);
+	if (cy >= ch)
+		return false;
+
+	IConsoleOutput::DirectLineAccess dla(g_winport_con_out, cy);
+	const CHAR_INFO *line = dla.Line();
+	const unsigned int w = line ? std::min(dla.Width(), cw) : 0;
+	for (unsigned int cx = 0; cx < w; ++cx) {
+		if (IsRTL(CellBaseChar(line[cx])))
+			return true;
+	}
+	return false;
+}
+
+} // namespace
 
 bool IsRTL(wchar_t wc)
 {
@@ -83,7 +112,7 @@ bool ReorderLine(CHAR_INFO *line, unsigned int cw, unsigned int *vis2log)
 	if (!has_rtl)
 		return false;
 
-	std::vector<Class> cls(cw);
+	std::vector<BidiClass> cls(cw);
 	std::vector<uint8_t> levels(cw, 0);
 	for (unsigned int i = 0; i < cw; ++i)
 		cls[i] = Classify(line[i]);
@@ -153,26 +182,6 @@ bool CopyAndReorderLine(const CHAR_INFO *src, unsigned int src_w, unsigned int c
 	if (copy_w < cw)
 		memset(line_buf + copy_w, 0, (cw - copy_w) * sizeof(CHAR_INFO));
 	return ReorderLine(line_buf, cw, nullptr);
-}
-
-static bool RowHasRTL(unsigned int cy)
-{
-	if (!g_winport_con_out)
-		return false;
-
-	unsigned int cw, ch;
-	g_winport_con_out->GetSize(cw, ch);
-	if (cy >= ch)
-		return false;
-
-	IConsoleOutput::DirectLineAccess dla(g_winport_con_out, cy);
-	const CHAR_INFO *line = dla.Line();
-	const unsigned int w = line ? std::min(dla.Width(), cw) : 0;
-	for (unsigned int cx = 0; cx < w; ++cx) {
-		if (IsRTL(CellBaseChar(line[cx])))
-			return true;
-	}
-	return false;
 }
 
 void ExpandDirtyArea(SMALL_RECT &area)

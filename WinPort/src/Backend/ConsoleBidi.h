@@ -1,15 +1,9 @@
 #pragma once
 
-#include <cstdint>
-
 #include "WinCompat.h"
 
 namespace ConsoleBidi
 {
-
-// BIDI_BOUND covers UI/service glyphs (box drawing, separators, blocks, any
-// non-letter symbol): they must always keep their cell and never be reordered.
-enum Class : uint8_t { BIDI_L, BIDI_R, BIDI_NUM, BIDI_NEUTRAL, BIDI_BOUND };
 
 bool IsRTL(wchar_t wc);
 bool CopyAndReorderLine(unsigned int cy, unsigned int cw, CHAR_INFO *line_buf);
