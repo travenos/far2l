@@ -15,8 +15,8 @@ namespace ConsoleBidi
 namespace
 {
 
-// BIDI_BOUND covers UI/service glyphs (box drawing, separators, blocks, any
-// non-letter symbol): they must always keep their cell and never be reordered.
+// BIDI_BOUND: UI/frame glyphs fixed to their cell (box drawing U+2500–U+25FF).
+// BIDI_NEUTRAL: whitespace, punctuation, editor visible-space marks (· ° …).
 enum BidiClass : uint8_t { BIDI_L, BIDI_R, BIDI_NUM, BIDI_NEUTRAL, BIDI_BOUND };
 
 wchar_t CellBaseChar(const CHAR_INFO &ci)
@@ -35,6 +35,14 @@ bool IsNum(wchar_t wc)
 		|| (wc >= 0x06F0 && wc <= 0x06F9);  // Extended Arabic-Indic digits
 }
 
+// Panel/frame glyphs that must stay in their cell (box drawing, blocks, ░▒▓█…).
+// Other non-letter symbols — including editor "show whitespace" marks (· ° ␠ …) —
+// are neutral and participate in the surrounding RTL/LTR run like spaces.
+static bool IsServiceGlyph(wchar_t wc)
+{
+	return (wc >= 0x2500 && wc <= 0x25FF);
+}
+
 BidiClass Classify(const CHAR_INFO &ci)
 {
 	const wchar_t wc = CellBaseChar(ci);
@@ -48,7 +56,9 @@ BidiClass Classify(const CHAR_INFO &ci)
 		return BIDI_L;
 	if (iswspace((wint_t)wc) || wc < 0x80)
 		return BIDI_NEUTRAL;
-	return BIDI_BOUND;
+	if (IsServiceGlyph(wc))
+		return BIDI_BOUND;
+	return BIDI_NEUTRAL;
 }
 
 void CopyConsoleLine(unsigned int cy, unsigned int cw, CHAR_INFO *line_buf)
