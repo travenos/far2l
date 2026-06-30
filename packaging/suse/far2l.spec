@@ -24,12 +24,12 @@ BuildRequires:  pkgconfig
 BuildRequires:  make
 %if %{defined suse_version}
 BuildRequires: 	wxGTK3-3_2-devel 
-BuildRequires: 	libxml2-devel libneon-devel libopenssl-devel libuchardet-devel
+BuildRequires: 	libxml2-devel libneon-devel libopenssl-devel libuchardet-devel libfribidi-devel
 BuildRequires:	update-desktop-files
 %endif
 %if 0%{?fedora} || 0%{?rhel_version} || 0%{?centos_version}
 BuildRequires:  wxGTK-devel >= 3.1
-BuildRequires: 	libxml2-devel neon-devel openssl-devel uchardet-devel
+BuildRequires: 	libxml2-devel neon-devel openssl-devel uchardet-devel fribidi-devel
 %endif
 BuildRequires:  fmt-devel libarchive-devel
 BuildRequires:  libnfs-devel libsmbclient-devel libssh-devel

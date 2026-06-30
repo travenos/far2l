@@ -22,7 +22,6 @@ set(SOURCES
     wxConsoleInputShim.cpp
     wxConsoleImages.cpp
     wxPrinterSupport.cpp
-    ../ConsoleBidi.cpp
 )
 
 if (${CMAKE_SYSTEM_NAME} MATCHES "Darwin")
@@ -74,9 +73,9 @@ target_include_directories(far2l_gui PRIVATE ${wxWidgets_INCLUDE_DIRS})
 #${wxWidgets_CXX_FLAGS}
 
 if (${CMAKE_SYSTEM_NAME} MATCHES "Darwin")
-    target_link_libraries(far2l_gui utils far2l "-framework IOKit -framework Carbon -framework Cocoa -framework AudioToolbox -framework System -framework OpenGL -framework WebKit" ${wxWidgets_LIBRARIES})
+    target_link_libraries(far2l_gui utils far2l console_bidi "-framework IOKit -framework Carbon -framework Cocoa -framework AudioToolbox -framework System -framework OpenGL -framework WebKit" ${wxWidgets_LIBRARIES})
 else()
-    target_link_libraries(far2l_gui utils far2l ${wxWidgets_LIBRARIES})
+    target_link_libraries(far2l_gui utils far2l console_bidi ${wxWidgets_LIBRARIES})
 endif()
 
 set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} ${wxWidgets_CXX_FLAGS}")

@@ -17,7 +17,6 @@ set(SOURCES
     SDLImageManager.cpp
     SDLFontManager.cpp
     SDLPrinterSupport.cpp
-    ../ConsoleBidi.cpp
 )
 
 if(APPLE)
@@ -51,7 +50,7 @@ if(NOT APPLE)
     target_compile_options(far2l_sdl PRIVATE ${FONTCONFIG_CFLAGS_OTHER})
 endif()
 
-target_link_libraries(far2l_sdl utils far2l ${SDL2_LIBRARIES} ${FREETYPE_LIBRARIES} ${HARFBUZZ_LIBRARIES})
+target_link_libraries(far2l_sdl utils far2l console_bidi ${SDL2_LIBRARIES} ${FREETYPE_LIBRARIES} ${HARFBUZZ_LIBRARIES})
 if(NOT APPLE)
     target_link_libraries(far2l_sdl ${FONTCONFIG_LIBRARIES})
 endif()

@@ -296,7 +296,7 @@ docker run -it far2l
 
 or simply on **Debian/Ubuntu** (without SDL-dependencies):
 ``` sh
-apt-get install libwxgtk3.0-gtk3-dev libx11-dev libxi-dev libxml2-dev libuchardet-dev libssh-dev libssl-dev libsmbclient-dev libnfs-dev libneon27-dev libarchive-dev cmake pkg-config g++ git
+apt-get install libwxgtk3.0-gtk3-dev libfribidi-dev libx11-dev libxi-dev libxml2-dev libuchardet-dev libssh-dev libssl-dev libsmbclient-dev libnfs-dev libneon27-dev libarchive-dev cmake pkg-config g++ git
 ```
 
 In older distributions: use `libwxgtk3.0-dev` instead of `libwxgtk3.0-gtk3-dev`.
